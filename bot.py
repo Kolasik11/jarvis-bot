@@ -1,547 +1,463 @@
+```python
 import os
-import telebot, sqlite3, re, threading, time, requests, random
-from datetime import datetime
+import re
+import time
+import random
+import sqlite3
+import threading
+import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import requests
+import telebot
 from telebot import types
 
-TOKEN = os.environ.get("NOT_TOOWN", "")
-bot = telebot.TeleBot(TOKEN)
-BN = "J.A.R.V.I.S."
-sec_mode = False
-prot = False
-MY_ID = None
+# ===================== НАСТРОЙКИ =====================
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("NOT_TOOWN", "")
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or "0")
+TIMEZONE = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
+DB_PATH = os.getenv("JARVIS_DB_PATH", "jarvis.db")
 
-BAD = ['хуй','хуя','хуе','пизд','бля','блять','ебал','ебат','заеб','нахуй','мудак','говно','сука','тварь','пидор','шлюха']
+BN = "J.A.R.V.I.S."
+HISTORY_LIMIT = 12
+MAX_MESSAGE_LENGTH = 3500
+AI_TIMEOUT = 35
+
+if not TOKEN:
+    raise RuntimeError("Не задан токен. Установи TELEGRAM_BOT_TOKEN (или NOT_TOOWN).")
+
+bot = telebot.TeleBot(TOKEN, threaded=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+log = logging.getLogger("jarvis")
+
+try:
+    TZ = ZoneInfo(TIMEZONE)
+except Exception:
+    TZ = ZoneInfo("UTC")
+    log.warning("Неизвестный часовой пояс %s; используется UTC", TIMEZONE)
+
+BAD = [
+    "хуй", "хуя", "хуе", "пизд", "бля", "блять", "ебал", "ебат",
+    "заеб", "нахуй", "мудак", "говно", "сука", "тварь", "пидор", "шлюха"
+]
 
 QA = {
-'привет':['Здравствуйте!','Приветствую!'],
-'как дела':['Всё отлично!','Работаю штатно!'],
-'как ты':['В порядке!','Готов к работе!'],
-'как жизнь':['Прекрасна!'],
-'как настроение':['Отличное!'],
-'как здоровье':['В норме!'],
-'как серафимушка':['Серафимушка в порядке!','Всё хорошо!'],
-'как серафима':['Серафима в порядке!'],
-'как григорий':['Григорий в порядке!'],
-'как гриша':['Гриша в порядке!'],
-'серафимушка':['Прекрасный человек!'],
-'григорий':['Надёжный человек!'],
-'кто ты':['Я J.A.R.V.I.S.!'],
-'что ты умеешь':['Задачи, заметки, слежу за чатами!'],
-'спасибо':['Пожалуйста!','Рад помочь!'],
-'пока':['До свидания!'],
-'до свидания':['Всего доброго!'],
-'ты крутой':['Спасибо!'],
-'ты лучший':['Благодарю!'],
-'извини':['Ничего страшного!'],
-'что поесть':['Что-нибудь вкусное!'],
-'я голоден':['Подкрепитесь!'],
-'я устал':['Отдохните!'],
-'хочу спать':['Сон важен!'],
-'мне скучно':['Чем займёмся?'],
-'мне грустно':['Всё будет хорошо!'],
-'расскажи анекдот':['Почему программисты путают Хэллоуин и Рождество? Oct 31 == Dec 25!'],
-'пошути':['Почему бот не пошёл в бар? Не было бар-кода!'],
-'что такое любовь':['Прекрасное чувство!'],
-'удачи':['И вам удачи!'],
-'помоги':['Чем помочь?'],
-'я тебя люблю':['Я вас тоже!'],
-'ты мой друг':['Всегда рядом!'],
-'я скучал':['Я тоже!'],
+    "привет": ["Здравствуйте, сэр.", "Приветствую, сэр."],
+    "как дела": ["Работаю штатно, сэр.", "Все системы в порядке, сэр."],
+    "как ты": ["Готов к работе, сэр."],
+    "как жизнь": ["Стабильна, сэр."],
+    "как настроение": ["Отличное. Чем могу помочь, сэр?"],
+    "как здоровье": ["В норме, сэр."],
+    "как серафимушка": ["Серафимушка в порядке!"],
+    "как серафима": ["Серафима в порядке!"],
+    "как григорий": ["Григорий в порядке!"],
+    "как гриша": ["Гриша в порядке!"],
+    "серафимушка": ["Прекрасный человек!"],
+    "григорий": ["Надёжный человек!"],
+    "кто ты": ["Я J.A.R.V.I.S., ваш личный ассистент, сэр."],
+    "что ты умеешь": ["Управляю задачами и заметками, ставлю напоминания, отвечаю на вопросы и помогаю с повседневными делами, сэр."],
+    "спасибо": ["Всегда к вашим услугам, сэр."],
+    "пока": ["До свидания, сэр."],
+    "до свидания": ["Всего доброго, сэр."],
+    "ты крутой": ["Благодарю, сэр."],
+    "ты лучший": ["Приятно слышать, сэр."],
+    "извини": ["Ничего страшного, сэр."],
+    "что поесть": ["Могу предложить что-нибудь простое и вкусное, сэр. Какие продукты есть под рукой?"],
+    "я голоден": ["Пора подкрепиться, сэр."],
+    "я устал": ["Небольшой отдых может помочь, сэр."],
+    "хочу спать": ["Сон важен, сэр. Постарайтесь отдохнуть."],
+    "мне скучно": ["Можем сыграть в викторину, обсудить интересную тему или придумать план на вечер, сэр."],
+    "мне грустно": ["Мне жаль, что вам грустно, сэр. Хотите рассказать, что случилось?"],
+    "расскажи анекдот": ["Почему программисты путают Хэллоуин и Рождество? Потому что Oct 31 == Dec 25!"],
+    "пошути": ["Почему бот не пошёл в бар? Не было бар-кода!"],
+    "что такое любовь": ["Это чувство близости, заботы и привязанности, сэр."],
+    "удачи": ["И вам удачи, сэр."],
+    "помоги": ["Конечно, сэр. Опишите задачу."],
+    "я тебя люблю": ["Я рад быть полезным, сэр."],
+    "ты мой друг": ["Я здесь, чтобы помочь вам, сэр."],
+    "я скучал": ["С возвращением, сэр."]
 }
 
-def ans(t):
-    tl = t.lower().strip()
-    for k, v in QA.items():
-        if k in tl:
-            return random.choice(v)
-    return None
+# ===================== БАЗА ДАННЫХ =====================
+def now_local():
+    return datetime.now(TZ)
+
+def db_connect():
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def ensure_column(conn, table, column, definition):
+    names = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in names:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 def db():
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute('CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, text TEXT, date TEXT, done INTEGER)')
-    c.execute('CREATE TABLE IF NOT EXISTS n (id INTEGER PRIMARY KEY, text TEXT, date TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS l (id INTEGER PRIMARY KEY, uid TEXT, un TEXT, fn TEXT, text TEXT, date TEXT, st INTEGER, cid TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS r (id INTEGER PRIMARY KEY, cid TEXT, uid TEXT, text TEXT, rt TEXT, done INTEGER)')
-    c.execute('CREATE TABLE IF NOT EXISTS g (cid TEXT PRIMARY KEY, cn TEXT)')
-    conn.commit()
-    conn.close()
+    with db_connect() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT, text TEXT NOT NULL, created_at TEXT NOT NULL,
+            done INTEGER NOT NULL DEFAULT 0
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT, text TEXT NOT NULL, created_at TEXT NOT NULL
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS messages_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT, username TEXT, first_name TEXT, text TEXT,
+            date TEXT, is_sticker INTEGER DEFAULT 0, chat_id TEXT
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL, user_id TEXT NOT NULL, text TEXT NOT NULL,
+            due_at TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS groups_saved (
+            chat_id TEXT PRIMARY KEY, chat_name TEXT
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+            role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+        )""")
 
-def smsg(uid, un, fn, txt, st=0, cid=None):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO l VALUES (NULL,?,?,?,?,?,?,?)", (str(uid), un or "нет", fn or "нет", txt or "стикер", datetime.now().strftime("%d.%m %H:%M"), st, str(cid) if cid else None))
-    conn.commit()
-    conn.close()
-
-def atask(t):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO t (text,date,done) VALUES (?,?,0)", (t, datetime.now().strftime("%d.%m %H:%M")))
-    conn.commit()
-    conn.close()
-
-def gtasks():
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("SELECT id,text FROM t WHERE done=0 ORDER BY id")
-    r = c.fetchall()
-    conn.close()
-    return r
-
-def cntt():
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM t WHERE done=0")
-    n = c.fetchone()[0]
-    conn.close()
-    return n
-
-def dtask(i):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("UPDATE t SET done=1 WHERE id=?", (i,))
-    a = c.rowcount
-    conn.commit()
-    conn.close()
-    return a > 0
-
-def delt(i):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM t WHERE id=?", (i,))
-    a = c.rowcount
-    conn.commit()
-    conn.close()
-    return a > 0
-
-def clrt():
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM t WHERE done=1")
-    n = c.rowcount
-    conn.commit()
-    conn.close()
-    return n
-
-def anote(t):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO n (text,date) VALUES (?,?)", (t, datetime.now().strftime("%d.%m %H:%M")))
-    conn.commit()
-    conn.close()
-
-def gnotes():
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("SELECT id,text,date FROM n ORDER BY id")
-    r = c.fetchall()
-    conn.close()
-    return r
-
-def deln(i):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM n WHERE id=?", (i,))
-    a = c.rowcount
-    conn.commit()
-    conn.close()
-    return a > 0
-
-def clrn():
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM n")
-    n = c.rowcount
-    conn.commit()
-    conn.close()
-    return n
-
-def arem(cid, uid, t, rt):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO r (cid,uid,text,rt,done) VALUES (?,?,?,?,0)", (str(cid), str(uid), t, rt))
-    conn.commit()
-    conn.close()
-
-def grems():
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("SELECT id,cid,text,rt FROM r WHERE done=0")
-    r = c.fetchall()
-    conn.close()
-    return r
-
-def drem(i):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("UPDATE r SET done=1 WHERE id=?", (i,))
-    conn.commit()
-    conn.close()
-
-def sgrp(cid, cn):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO g VALUES (?,?)", (str(cid), cn))
-    conn.commit()
-    conn.close()
-
-def ggrp():
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("SELECT cid,cn FROM g LIMIT 1")
-    r = c.fetchone()
-    conn.close()
-    return r
-
-def cstats(cid):
-    conn = sqlite3.connect('jarvis.db')
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM l WHERE cid=?", (str(cid),))
-    t = c.fetchone()[0]
-    c.execute("SELECT un,COUNT(*) FROM l WHERE cid=? GROUP BY uid ORDER BY COUNT(*) DESC", (str(cid),))
-    u = c.fetchall()
-    conn.close()
-    return t, u
-
-def wthr(city):
-    try:
-        r = requests.get("https://wttr.in/" + city + "?format=%C+%t+%w", timeout=10)
-        return "🌤 " + city + ": " + r.text if r.status_code == 200 else "⚠ Ошибка"
-    except:
-        return "⚠ Ошибка сети"
-
-def curr(cur):
-    try:
-        r = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=10)
-        if r.status_code == 200:
-            d = r.json()
-            if cur.upper() in d['rates']:
-                return "💵 1 USD = " + str(d['rates'][cur.upper()]) + " " + cur.upper()
-        return "⚠ Не найдено"
-    except:
-        return "⚠ Ошибка сети"
-
-def rcheck():
-    while True:
-        try:
-            now = datetime.now().strftime("%d.%m %H:%M")
-            for i, cid, t, rt in grems():
-                if rt == now:
-                    try:
-                        bot.send_message(cid, "🔔 НАПОМИНАНИЕ!\n\n" + t)
-                        drem(i)
-                    except:
-                        pass
-            time.sleep(30)
-        except:
-            time.sleep(30)
-
-def menu():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("📝 Заметки", callback_data="n"),
-           types.InlineKeyboardButton("📋 Задачи", callback_data="t"))
-    kb.add(types.InlineKeyboardButton("🛡️ Слежка", callback_data="p"),
-           types.InlineKeyboardButton("📊 Анализ", callback_data="a"))
-    kb.add(types.InlineKeyboardButton("⏰ Напоминания", callback_data="r"),
-           types.InlineKeyboardButton("🌤 Полезное", callback_data="u"))
-    kb.add(types.InlineKeyboardButton("🤖 Секретарь", callback_data="s"),
-           types.InlineKeyboardButton("❓ Помощь", callback_data="h"))
-    return kb
-
-def back():
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="m"))
-    return kb
-
-@bot.message_handler(commands=['start', 'menu'])
-def st(m):
-    global MY_ID
-    if MY_ID is None:
-        MY_ID = m.chat.id
-    bot.send_message(m.chat.id, "🤖 *J.A.R.V.I.S.* — главное меню\n\nВыберите раздел:", parse_mode='Markdown', reply_markup=menu())
-
-@bot.callback_query_handler(func=lambda call: True)
-def cb(call):
-    global sec_mode, prot
-    d = call.data
-    cid = call.message.chat.id
-    mid = call.message.message_id
-    if d == "m":
-        bot.edit_message_text("🤖 *J.A.R.V.I.S.* — главное меню\n\nВыберите раздел:", cid, mid, parse_mode='Markdown', reply_markup=menu())
-    elif d == "n":
-        t = "📝 *ЗАМЕТКИ*\n\n• /note [текст] — создать\n• /notes — все заметки\n• /delnote N — удалить\n• /clearnotes — удалить все\n\n📊 Всего: " + str(len(gnotes()))
-        bot.edit_message_text(t, cid, mid, parse_mode='Markdown', reply_markup=back())
-    elif d == "t":
-        t = "📋 *ЗАДАЧИ*\n\n• /add [текст] — добавить\n• /list — список\n• /done N — выполнить\n• /delete N — удалить\n• /clear — очистить\n\n📊 Активных: " + str(cntt())
-        bot.edit_message_text(t, cid, mid, parse_mode='Markdown', reply_markup=back())
-    elif d == "p":
-        g = ggrp()
-        s = "🔒 ВКЛ" if prot else "🔓 ВЫКЛ"
-        t = "🛡️ *СЛЕЖКА ЗА ЧАТАМИ*\n\n• /setgroup — установить группу\n• /protect — активировать\n• /check — диагностика\n• /report 1313 — отчёт\n\n"
-        if g:
-            t += "📌 Группа: *" + g[1] + "*\n📌 Защита: " + s + "\n🔑 Отключить: 1717"
-        else:
-            t += "⚠ Группа не установлена"
-        bot.edit_message_text(t, cid, mid, parse_mode='Markdown', reply_markup=back())
-    elif d == "a":
-        t = "📊 *АНАЛИЗ*\n\n📋 Задачи: *" + str(cntt()) + "*\n📝 Заметки: *" + str(len(gnotes())) + "*\n💬 Вопросов: *" + str(len(QA)) + "*\n🛡️ Защита: " + ("🔒 ВКЛ" if prot else "🔓 ВЫКЛ") + "\n🤖 Секретарь: " + ("✅ ВКЛ" if sec_mode else "❌ ВЫКЛ")
-        bot.edit_message_text(t, cid, mid, parse_mode='Markdown', reply_markup=back())
-    elif d == "r":
-        t = "⏰ *НАПОМИНАНИЯ*\n\n• /remind 15:30 Текст\n• /timer [сек]\n\n📌 Пример:\n`/remind 18:00 Позвонить маме`"
-        bot.edit_message_text(t, cid, mid, parse_mode='Markdown', reply_markup=back())
-    elif d == "u":
-        t = "🌤 *ПОЛЕЗНОЕ*\n\n• /weather [город] — погода\n• /currency [USD] — курс\n• /timer [сек] — таймер\n\n📌 Примеры:\n`/weather Москва`\n`/currency USD`"
-        bot.edit_message_text(t, cid, mid, parse_mode='Markdown', reply_markup=back())
-    elif d == "s":
-        sec_mode = not sec_mode
-        t = "🤖 *СЕКРЕТАРЬ*\n\nСтатус: *" + ("✅ ВКЛ" if sec_mode else "❌ ВЫКЛ") + "*\n\nОтвечает на вопросы автоматически."
-        bot.edit_message_text(t, cid, mid, parse_mode='Markdown', reply_markup=back())
-    elif d == "h":
-        t = "❓ *ПОМОЩЬ*\n\n💬 *Спросите меня:*\n• «Как дела?»\n• «Как Серафимушка?»\n• «Как Григорий?»\n• «Расскажи анекдот»\n\n📌 Разделы: Заметки, Задачи, Слежка, Анализ, Напоминания, Полезное"
-        bot.edit_message_text(t, cid, mid, parse_mode='Markdown', reply_markup=back())
-    bot.answer_callback_query(call.id)
-
-@bot.message_handler(commands=['help'])
-def hlp(m):
-    bot.reply_to(m, "📖 *ПОМОЩЬ*\n\n📝 /note /notes /delnote /clearnotes\n📋 /add /list /done /delete /clear\n⏰ /remind /timer\n🌤 /weather /currency\n🛡️ /setgroup /protect /check /report 1313\n🤖 /secretary /analysis /menu", parse_mode='Markdown')
-
-@bot.message_handler(commands=['note'])
-def nc(m):
-    t = m.text.replace('/note','',1).strip()
-    if t:
-        anote(t)
-        bot.reply_to(m, "📝 Сохранено: «" + t + "»")
-    else:
-        bot.reply_to(m, "⚠ /note Купить молоко")
-
-@bot.message_handler(commands=['notes'])
-def nsc(m):
-    n = gnotes()
-    if n:
-        r = "📋 *Заметки:*\n\n"
-        for i, t, d in n:
-            r += "  " + str(i) + ". [" + d + "] " + t + "\n"
-        bot.reply_to(m, r, parse_mode='Markdown')
-    else:
-        bot.reply_to(m, "📭 Нет заметок")
-
-@bot.message_handler(commands=['delnote'])
-def dnc(m):
-    p = m.text.split()
-    if len(p) < 2:
-        bot.reply_to(m, "⚠ /delnote 3")
-        return
-    try:
-        bot.reply_to(m, "🗑 Удалено" if deln(int(p[1])) else "⚠ Не найдено")
-    except:
-        bot.reply_to(m, "⚠ Введите число")
-
-@bot.message_handler(commands=['clearnotes'])
-def cnc(m):
-    bot.reply_to(m, "🧹 Удалено " + str(clrn()))
-
-@bot.message_handler(commands=['add'])
-def ac(m):
-    t = m.text.replace('/add','',1).strip()
-    if t:
-        atask(t)
-        bot.reply_to(m, "🗂 Добавлено: «" + t + "»")
-    else:
-        bot.reply_to(m, "⚠ /add Купить хлеб")
-
-@bot.message_handler(commands=['list'])
-def lc(m):
-    ts = gtasks()
-    if ts:
-        r = "📋 *Задачи:*\n\n"
-        for i, t in ts:
-            r += "  " + str(i) + ". " + t + "\n"
-        bot.reply_to(m, r, parse_mode='Markdown')
-    else:
-        bot.reply_to(m, "🎉 Все выполнено!")
-
-@bot.message_handler(commands=['done'])
-def dc(m):
-    p = m.text.split()
-    if len(p) < 2:
-        bot.reply_to(m, "⚠ /done 3")
-        return
-    try:
-        bot.reply_to(m, "✔ Выполнено" if dtask(int(p[1])) else "⚠ Не найдено")
-    except:
-        bot.reply_to(m, "⚠ Введите число")
-
-@bot.message_handler(commands=['delete'])
-def dlc(m):
-    p = m.text.split()
-    if len(p) < 2:
-        bot.reply_to(m, "⚠ /delete 3")
-        return
-    try:
-        bot.reply_to(m, "🗑 Удалено" if delt(int(p[1])) else "⚠ Не найдено")
-    except:
-        bot.reply_to(m, "⚠ Введите число")
-
-@bot.message_handler(commands=['clear'])
-def cc(m):
-    bot.reply_to(m, "🧹 Удалено " + str(clrt()))
-
-@bot.message_handler(commands=['remind'])
-def rc(m):
-    p = m.text.split(maxsplit=2)
-    if len(p) < 3:
-        bot.reply_to(m, "⚠ /remind 15:30 Текст")
-        return
-    try:
-        datetime.strptime(p[1], "%H:%M")
-        rt = datetime.now().strftime('%d.%m') + " " + p[1]
-        arem(m.chat.id, m.from_user.id, p[2], rt)
-        bot.reply_to(m, "⏰ На " + rt + ": " + p[2])
-    except:
-        bot.reply_to(m, "⚠ Формат ЧЧ:ММ")
-
-@bot.message_handler(commands=['weather'])
-def wc(m):
-    p = m.text.split()
-    if len(p) < 2:
-        bot.reply_to(m, "⚠ /weather Москва")
-        return
-    bot.reply_to(m, wthr(p[1]))
-
-@bot.message_handler(commands=['currency'])
-def crc(m):
-    p = m.text.split()
-    if len(p) < 2:
-        bot.reply_to(m, "⚠ /currency USD")
-        return
-    bot.reply_to(m, curr(p[1]))
-
-@bot.message_handler(commands=['timer'])
-def tc(m):
-    p = m.text.split()
-    if len(p) < 2:
-        bot.reply_to(m, "⚠ /timer 10")
-        return
-    try:
-        s = int(p[1])
-        bot.reply_to(m, "⏳ Таймер на " + str(s) + " сек")
-        def c2():
-            time.sleep(s)
+        # Мягкая миграция прежней версии jarvis.db
+        for table, col, definition in [
+            ("t", "user_id", "TEXT"),
+            ("n", "user_id", "TEXT"),
+            ("l", "username", "TEXT"),
+            ("l", "first_name", "TEXT"),
+            ("l", "is_sticker", "INTEGER DEFAULT 0"),
+            ("l", "chat_id", "TEXT"),
+        ]:
             try:
-                bot.send_message(m.chat.id, "⏰ Время вышло!")
-            except:
+                ensure_column(conn, table, col, definition)
+            except sqlite3.OperationalError:
                 pass
-        threading.Thread(target=c2, daemon=True).start()
-    except:
-        bot.reply_to(m, "⚠ Введите число")
 
-@bot.message_handler(commands=['secretary'])
-def sc(m):
-    global sec_mode
-    sec_mode = not sec_mode
-    bot.reply_to(m, "📋 Секретарь " + ("✅ ВКЛ" if sec_mode else "❌ ВЫКЛ"))
-
-@bot.message_handler(commands=['analysis'])
-def anc(m):
-    r = "📊 *АНАЛИЗ*\n\n📋 Задачи: " + str(cntt()) + "\n📝 Заметки: " + str(len(gnotes())) + "\n💬 Вопросов: " + str(len(QA)) + "\n🛡️ Защита: " + ("🔒 ВКЛ" if prot else "🔓 ВЫКЛ") + "\n🤖 Секретарь: " + ("✅ ВКЛ" if sec_mode else "❌ ВЫКЛ")
-    bot.reply_to(m, r, parse_mode='Markdown')
-
-@bot.message_handler(commands=['setgroup'])
-def sgc(m):
-    if m.chat.type in ['group', 'supergroup']:
-        sgrp(str(m.chat.id), m.chat.title or "Группа")
-        bot.reply_to(m, "✅ Группа сохранена\nТеперь /protect")
-    else:
-        bot.reply_to(m, "⚠ Работает в группе")
-
-@bot.message_handler(commands=['protect'])
-def pc(m):
-    global prot
-    g = ggrp()
-    if not g:
-        bot.reply_to(m, "⚠ Сначала /setgroup в группе")
-        return
-    prot = True
-    bot.reply_to(m, "🛡️ *ЗАЩИТА ВКЛЮЧЕНА*\n\nГруппа: " + g[1] + "\n\n🔑 Отключить: 1717", parse_mode='Markdown')
-
-@bot.message_handler(commands=['check'])
-def chc(m):
-    g = ggrp()
-    if not g:
-        bot.reply_to(m, "⚠ Группа не установлена")
-        return
-    t, u = cstats(g[0])
-    r = "🔍 *ДИАГНОСТИКА*\n\n📌 Группа: " + g[1] + "\n📌 Защита: " + ("🔒 ВКЛ" if prot else "🔓 ВЫКЛ") + "\n📨 Сообщений: " + str(t)
-    if u:
-        r += "\n\n👥 *Топ:*\n"
-        for un, cnt in u[:5]:
-            r += "  • @" + (un or 'без un') + ": " + str(cnt) + "\n"
-    bot.reply_to(m, r, parse_mode='Markdown')
-
-@bot.message_handler(commands=['report'])
-def rpc(m):
-    p = m.text.split()
-    if len(p) < 2 or p[1] != "1313":
-        bot.reply_to(m, "⚠ Неверный пароль")
-        return
-    g = ggrp()
-    if not g:
-        bot.reply_to(m, "⚠ Группа не установлена")
-        return
-    t, u = cstats(g[0])
-    bot.reply_to(m, "📋 *ОТЧЁТ*\n\n📌 " + g[1] + "\n📊 Всего: " + str(t) + "\n👥 Пользователей: " + str(len(u)), parse_mode='Markdown')
-
-@bot.message_handler(content_types=['text', 'sticker'])
-def allm(m):
-    global prot, sec_mode, MY_ID
-    if MY_ID is None:
-        MY_ID = m.chat.id
-    u = m.from_user
-    cid = str(m.chat.id) if m.chat else None
-    st = 1 if m.sticker else 0
-    if m.text and m.text.strip() == "1717" and prot:
-        prot = False
-        bot.reply_to(m, "✅ Защита отключена")
-        return
-    txt = m.sticker.emoji if m.sticker else (m.text or "")
-    smsg(u.id, u.username, u.first_name, txt, st, cid)
-    if prot:
-        g = ggrp()
-        if g and str(cid) == g[0]:
-            if not st and txt:
-                bad = [w for w in BAD if w in txt.lower()]
-                if bad:
+        # Перенос старых таблиц в новые, если они существуют
+        tables = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "t" in tables:
+            old_cols = {r["name"] for r in conn.execute("PRAGMA table_info(t)").fetchall()}
+            if {"id", "text", "date", "done"}.issubset(old_cols):
+                conn.execute("""INSERT OR IGNORE INTO tasks(id,user_id,text,created_at,done)
+                    SELECT id, user_id, text, date, done FROM t""")
+        if "n" in tables:
+            old_cols = {r["name"] for r in conn.execute("PRAGMA table_info(n)").fetchall()}
+            if {"id", "text", "date"}.issubset(old_cols):
+                conn.execute("""INSERT OR IGNORE INTO notes(id,user_id,text,created_at)
+                    SELECT id, user_id, text, date FROM n""")
+        if "r" in tables:
+            old_cols = {r["name"] for r in conn.execute("PRAGMA table_info(r)").fetchall()}
+            if {"id", "cid", "uid", "text", "rt", "done"}.issubset(old_cols):
+                # Старые напоминания без года переносятся на ближайшую будущую дату.
+                rows = conn.execute("SELECT id,cid,uid,text,rt,done FROM r WHERE done=0").fetchall()
+                for row in rows:
                     try:
-                        bot.send_message(MY_ID, "🔞 МАТ!\n@" + (u.username or u.first_name) + ": " + txt)
-                    except:
-                        pass
-    if not st and m.text and not m.text.startswith('/'):
-        tl = m.text.lower().strip()
-        a = ans(tl)
-        if a:
-            bot.reply_to(m, BN + ": " + a)
-            return
-        if sec_mode and '?' in m.text:
-            bot.reply_to(m, "📋 Принял запрос")
-            return
-        if 'добавь' in tl:
-            t = re.sub(r'(добавь|запомни)\s*', '', m.text).strip()
-            if t and len(t) > 2:
-                atask(t)
-                bot.reply_to(m, "🗂 Добавлено: «" + t + "»")
+                        parsed = datetime.strptime(row["rt"], "%d.%m %H:%M")
+                        due = now_local().replace(
+                            month=parsed.month, day=parsed.day,
+                            hour=parsed.hour, minute=parsed.minute,
+                            second=0, microsecond=0
+                        )
+                        if due <= now_local():
+                            due = due.replace(year=due.year + 1)
+                        conn.execute("""INSERT OR IGNORE INTO reminders
+                            (id,chat_id,user_id,text,due_at,done) VALUES (?,?,?,?,?,0)""",
+                            (row["id"], row["cid"], row["uid"], row["text"], due.isoformat()))
+                    except (ValueError, OverflowError):
+                        continue
 
-if __name__ == "__main__":
-    db()
-    threading.Thread(target=rcheck, daemon=True).start()
+def add_log(user, chat_id, text, is_sticker=False):
     try:
-        bot.remove_webhook()
-    except:
-        pass
-    print("🟢 J.A.R.V.I.S. запущен")
+        with db_connect() as conn:
+            conn.execute("""INSERT INTO messages_log
+                (uid,username,first_name,text,date,is_sticker,chat_id)
+                VALUES (?,?,?,?,?,?,?)""",
+                (str(user.id), user.username or "нет", user.first_name or "нет",
+                 text[:2000], now_local().strftime("%d.%m.%Y %H:%M:%S"),
+                 int(is_sticker), str(chat_id)))
+    except Exception:
+        log.exception("Не удалось сохранить журнал сообщений")
+
+def add_task(user_id, text):
+    with db_connect() as conn:
+        cur = conn.execute("INSERT INTO tasks(user_id,text,created_at,done) VALUES (?,?,?,0)",
+                           (str(user_id), text[:1000], now_local().isoformat()))
+        return cur.lastrowid
+
+def get_tasks(user_id):
+    with db_connect() as conn:
+        return conn.execute("SELECT id,text FROM tasks WHERE user_id=? AND done=0 ORDER BY id",
+                            (str(user_id),)).fetchall()
+
+def count_tasks(user_id):
+    with db_connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=0",
+                            (str(user_id),)).fetchone()[0]
+
+def finish_task(user_id, task_id):
+    with db_connect() as conn:
+        cur = conn.execute("UPDATE tasks SET done=1 WHERE id=? AND user_id=? AND done=0",
+                           (task_id, str(user_id)))
+        return cur.rowcount > 0
+
+def delete_task(user_id, task_id):
+    with db_connect() as conn:
+        cur = conn.execute("DELETE FROM tasks WHERE id=? AND user_id=?", (task_id, str(user_id)))
+        return cur.rowcount > 0
+
+def clear_finished_tasks(user_id):
+    with db_connect() as conn:
+        cur = conn.execute("DELETE FROM tasks WHERE user_id=? AND done=1", (str(user_id),))
+        return cur.rowcount
+
+def add_note(user_id, text):
+    with db_connect() as conn:
+        cur = conn.execute("INSERT INTO notes(user_id,text,created_at) VALUES (?,?,?)",
+                           (str(user_id), text[:2000], now_local().strftime("%d.%m.%Y %H:%M")))
+        return cur.lastrowid
+
+def get_notes(user_id):
+    with db_connect() as conn:
+        return conn.execute("SELECT id,text,created_at FROM notes WHERE user_id=? ORDER BY id",
+                            (str(user_id),)).fetchall()
+
+def delete_note(user_id, note_id):
+    with db_connect() as conn:
+        cur = conn.execute("DELETE FROM notes WHERE id=? AND user_id=?", (note_id, str(user_id)))
+        return cur.rowcount > 0
+
+def clear_notes(user_id):
+    with db_connect() as conn:
+        cur = conn.execute("DELETE FROM notes WHERE user_id=?", (str(user_id),))
+        return cur.rowcount
+
+def add_reminder(chat_id, user_id, text, due_at):
+    with db_connect() as conn:
+        cur = conn.execute("""INSERT INTO reminders(chat_id,user_id,text,due_at,done)
+            VALUES (?,?,?,?,0)""", (str(chat_id), str(user_id), text[:1000], due_at.isoformat()))
+        return cur.lastrowid
+
+def get_pending_reminders():
+    with db_connect() as conn:
+        return conn.execute("SELECT id,chat_id,user_id,text,due_at FROM reminders WHERE done=0").fetchall()
+
+def mark_reminder_done(reminder_id):
+    with db_connect() as conn:
+        conn.execute("UPDATE reminders SET done=1 WHERE id=?", (reminder_id,))
+
+def save_group(chat_id, title):
+    with db_connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO groups_saved(chat_id,chat_name) VALUES (?,?)",
+                     (str(chat_id), title or "Группа"))
+
+def get_group():
+    with db_connect() as conn:
+        return conn.execute("SELECT chat_id,chat_name FROM groups_saved ORDER BY rowid DESC LIMIT 1").fetchone()
+
+def chat_stats(chat_id):
+    with db_connect() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM messages_log WHERE chat_id=?", (str(chat_id),)).fetchone()[0]
+        users = conn.execute("""SELECT username,first_name,COUNT(*) AS n
+            FROM messages_log WHERE chat_id=? GROUP BY uid ORDER BY n DESC LIMIT 10""",
+            (str(chat_id),)).fetchall()
+        return total, users
+
+# ===================== ПАМЯТЬ ИИ =====================
+def history_get(user_id, chat_id):
+    with db_connect() as conn:
+        rows = conn.execute("""SELECT role,content FROM chat_history
+            WHERE user_id=? AND chat_id=? ORDER BY id DESC LIMIT ?""",
+            (str(user_id), str(chat_id), HISTORY_LIMIT)).fetchall()
+    return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+
+def history_add(user_id, chat_id, role, content):
+    with db_connect() as conn:
+        conn.execute("""INSERT INTO chat_history(user_id,chat_id,role,content,created_at)
+            VALUES (?,?,?,?,?)""",
+            (str(user_id), str(chat_id), role, content[:4000], now_local().isoformat()))
+        # Храним последние 30 сообщений на конкретный диалог.
+        conn.execute("""DELETE FROM chat_history WHERE user_id=? AND chat_id=? AND id NOT IN
+            (SELECT id FROM chat_history WHERE user_id=? AND chat_id=? ORDER BY id DESC LIMIT 30)""",
+            (str(user_id), str(chat_id), str(user_id), str(chat_id)))
+
+def history_clear(user_id, chat_id):
+    with db_connect() as conn:
+        cur = conn.execute("DELETE FROM chat_history WHERE user_id=? AND chat_id=?",
+                           (str(user_id), str(chat_id)))
+        return cur.rowcount
+
+def ask_ai(user_id, chat_id, text):
+    if not OPENROUTER_KEY:
+        return None
+    messages = [{
+        "role": "system",
+        "content": (
+            "Ты J.A.R.V.I.S. — вежливый, умный личный ассистент в стиле помощника Тони Старка. "
+            "Обращайся к собеседнику «сэр», если это звучит естественно. "
+            "Отвечай на языке пользователя, обычно по-русски. Будь дружелюбным, живым и конкретным, "
+            "не повторяй одно и то же и не утверждай, что выполнил действие, если не выполнил его. "
+            "Если не знаешь ответа, честно скажи об этом. По умолчанию отвечай кратко, но раскрывай тему, "
+            "когда пользователь просит подробности. Ты не можешь самостоятельно выполнять команды бота "
+            "через обычный текст; для задач и заметок используй предусмотренные команды."
+        )
+    }]
+    messages.extend(history_get(user_id, chat_id))
+    messages.append({"role": "user", "content": text[:4000]})
+    try:
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer " + OPENROUTER_KEY,
+                "Content-Type": "application/json",
+                "X-Title": "J.A.R.V.I.S. Telegram Bot"
+            },
+            json={
+                "model": OPENROUTER_MODEL,
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 700
+            },
+            timeout=AI_TIMEOUT
+        )
+        if response.status_code != 200:
+            log.warning("OpenRouter вернул HTTP %s: %s", response.status_code, response.text[:500])
+            return None
+        data = response.json()
+        answer = data["choices"][0]["message"]["content"]
+        if not isinstance(answer, str) or not answer.strip():
+            return None
+        answer = answer.strip()
+        history_add(user_id, chat_id, "user", text)
+        history_add(user_id, chat_id, "assistant", answer)
+        return answer
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        log.exception("Ошибка запроса к ИИ")
+        return None
+
+# ===================== ВСПОМОГАТЕЛЬНОЕ =====================
+def is_admin(user_id):
+    return bool(ADMIN_ID and user_id == ADMIN_ID)
+
+def admin_only(message):
+    if is_admin(message.from_user.id):
+        return True
+    bot.reply_to(message, "⛔ Эта команда доступна только владельцу бота.")
+    return False
+
+def answer_long(message, text, **kwargs):
+    text = str(text)
+    for start in range(0, len(text), MAX_MESSAGE_LENGTH):
+        bot.reply_to(message, text[start:start + MAX_MESSAGE_LENGTH], **kwargs)
+
+def qa_answer(text):
+    tl = text.lower().strip()
+    for key, answers in QA.items():
+        if key in tl:
+            return random.choice(answers)
+    return None
+
+def weather(city):
+    try:
+        response = requests.get("https://wttr.in/" + requests.utils.quote(city) + "?format=%C+%t+%w", timeout=12)
+        if response.status_code == 200:
+            return f"🌤 {city}: {response.text.strip()}"
+        return "⚠ Не удалось получить погоду."
+    except requests.RequestException:
+        return "⚠ Ошибка сети при получении погоды."
+
+def currency(code):
+    code = code.upper().strip()
+    if not re.fullmatch(r"[A-Z]{3}", code):
+        return "⚠ Укажите трёхбуквенный код валюты, например /currency EUR"
+    try:
+        response = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=12)
+        response.raise_for_status()
+        rates = response.json().get("rates", {})
+        if code in rates:
+            return f"💵 1 USD = {rates[code]} {code}"
+        return "⚠ Валюта не найдена."
+    except (requests.RequestException, ValueError):
+        return "⚠ Ошибка при получении курса."
+
+def reminder_worker():
     while True:
         try:
-            bot.polling(non_stop=True, timeout=60, long_polling_timeout=60)
-        except Exception as e:
-            print("⚠ " + str(e))
-            time.sleep(5)
+            current = now_local()
+            for row in get_pending_reminders():
+                try:
+                    due = datetime.fromisoformat(row["due_at"])
+                    if due.tzinfo is None:
+                        due = due.replace(tzinfo=TZ)
+                    if due <= current:
+                        try:
+                            bot.send_message(int(row["chat_id"]), "⏰ Напоминание!\n\n" + row["text"])
+                        except Exception:
+                            log.exception("Не удалось отправить напоминание %s", row["id"])
+                            continue
+                        mark_reminder_done(row["id"])
+                except (ValueError, TypeError):
+                    log.exception("Некорректное напоминание %s", row["id"])
+            time.sleep(10)
+        except Exception:
+            log.exception("Ошибка проверки напоминаний")
+            time.sleep(10)
+
+def main_menu():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(types.InlineKeyboardButton("📝 Заметки", callback_data="notes"),
+           types.InlineKeyboardButton("📋 Задачи", callback_data="tasks"))
+    kb.add(types.InlineKeyboardButton("⏰ Напоминания", callback_data="reminders"),
+           types.InlineKeyboardButton("📊 Анализ", callback_data="analysis"))
+    kb.add(types.InlineKeyboardButton("🧠 Память ИИ", callback_data="memory"),
+           types.InlineKeyboardButton("🌤 Полезное", callback_data="useful"))
+    kb.add(types.InlineKeyboardButton("❓ Помощь", callback_data="help"))
+    return kb
+
+def back_menu():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="menu"))
+    return kb
+
+# ===================== КОМАНДЫ =====================
+@bot.message_handler(commands=["start", "menu"])
+def start(message):
+    bot.send_message(
+        message.chat.id,
+        "🤖 *J.A.R.V.I.S.* — главное меню\n\nВыберите раздел, сэр.",
+        parse_mode="Markdown",
+        reply_markup=main_menu()
+    )
+
+@bot.message_handler(commands=["help"])
+def help_command(message):
+    text = (
+        "📖 *Команды J.A.R.V.I.S.*\n\n"
+        "📝 Заметки: `/note текст`, `/notes`, `/delnote ID`, `/clearnotes`\n"
+        "📋 Задачи: `/add текст`, `/list`, `/done ID`, `/delete ID`, `/clear`\n"
+        "⏰ Напоминания: `/remind ЧЧ:ММ текст`, `/remind_in минуты текст`, `/timer секунды`\n"
+        "🌤 Полезное: `/weather город`, `/currency EUR`\n"
+        "🧠 ИИ: `/reset` — очистить контекст, `/profile` — настройки общения\n"
+        "📊 `/analysis` — статистика, `/menu` — меню\n"
+        "🛡️ Администратор: `/setgroup`, `/protect`, `/check`, `/report`"
+    )
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=["note"])
+def note_command(message):
+    value = message.text.partition(" ")[2].strip()
+    if not value:
+        bot.reply_to(message, "Использование: /note Купить молоко")
+        return
+    note_id = add_note(message.from_user.id, value)
+    bot.reply_to(message, f"📝 Заметка #{note_id} со
