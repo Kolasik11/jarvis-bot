@@ -105,7 +105,7 @@ def chat(m):
     try:
         res = requests.post("https://openrouter.ai/api/v1/chat/completions", 
             headers={"Authorization": f"Bearer {AI_KEY}"},
-            json={"model": "mistralai/mistral-7b-instruct:free", 
+            json={"model": "microsoft/phi-3-mini-128k-instruct:free", 
                   "messages": [{"role": "user", "content": m.text}]}, timeout=30)
         
         if res.status_code == 200:
