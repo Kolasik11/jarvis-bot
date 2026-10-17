@@ -6,11 +6,9 @@ import telebot
 import logging
 from telebot import types
 
-# Настраиваем логи, чтобы видеть ошибки
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-# Меняем имя переменной на AI_KEY, чтобы телефон её не обрезал
 AI_KEY = os.getenv("AI_KEY")
 
 if not TOKEN:
@@ -100,23 +98,20 @@ def chat(m):
             bot.reply_to(m, v)
             return
     
-    # Если ключа нет в переменных, пишем об этом
     if not AI_KEY:
         bot.reply_to(m, "Сэр, ключ AI_KEY не найден в настройках Bothost.")
         return
 
-    # Идем к ИИ и логируем ошибку, если что-то не так
     try:
         res = requests.post("https://openrouter.ai/api/v1/chat/completions", 
             headers={"Authorization": f"Bearer {AI_KEY}"},
-            json={"model": "google/gemini-2.0-flash-exp:free", 
+            json={"model": "meta-llama/llama-3-8b-instruct:free", 
                   "messages": [{"role": "user", "content": m.text}]}, timeout=30)
         
         if res.status_code == 200:
             ans = res.json()["choices"][0]["message"]["content"]
             bot.reply_to(m, ans)
         else:
-            # Логируем код ошибки в консоль, чтобы мы его увидели
             logging.error(f"OpenRouter Error: {res.status_code} - {res.text}")
             bot.reply_to(m, f"Сэр, ошибка ИИ (код {res.status_code}).")
     except Exception as e:
