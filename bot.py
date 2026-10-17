@@ -105,7 +105,7 @@ def chat(m):
     try:
         res = requests.post("https://openrouter.ai/api/v1/chat/completions", 
             headers={"Authorization": f"Bearer {AI_KEY}"},
-            json={"model": "google/gemini-2.0-flash-lite-preview-02-05:free", 
+            json={"model": "google/gemini-2.0-flash-exp:free", 
                   "messages": [{"role": "user", "content": m.text}]}, timeout=30)
         
         if res.status_code == 200:
